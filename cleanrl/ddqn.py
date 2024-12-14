@@ -199,41 +199,43 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         obs = next_obs
 
         # ALGO LOGIC: training.
-    if global_step > args.learning_starts:
-        if global_step % args.train_frequency == 0:
-            data = rb.sample(args.batch_size)
-            with torch.no_grad():
-                # Double DQN logic:
-                next_q_values = q_network(data.next_observations)
-                next_actions = next_q_values.argmax(dim=1, keepdim=True)
+        if global_step > args.learning_starts:
+            if global_step % args.train_frequency == 0:
+                data = rb.sample(args.batch_size)
+
+    # Double DQN logic: Select action using q_network and evaluate it with target_network
+                with torch.no_grad():
+                    next_q_values = q_network(data.next_observations)
+                    next_actions = next_q_values.argmax(dim=1, keepdim=True)  # Action selection
+
+                    target_q_values = target_network(data.next_observations)
+                    target_max = target_q_values.gather(1, next_actions).squeeze(1)  # Action evaluation
+
+                    td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
+                    td_target = td_target.detach()  # Detach the td_target from the current graph
                 
-                next_target_q_values = target_network(data.next_observations)
-                
-                next_target_values = next_target_q_values.gather(1, next_actions).squeeze()
-                
-                td_target = data.rewards.flatten() + args.gamma * next_target_values * (1 - data.dones.flatten())
+                old_val = q_network(data.observations).gather(1, data.actions).squeeze(1)
 
-            current_q_values = q_network(data.observations)
-            current_q_value = current_q_values.gather(1, data.actions).squeeze()
+                loss = F.mse_loss(td_target, old_val)
 
-            loss = F.mse_loss(current_q_values,td_target)
+                if global_step % 100 == 0:
+                    writer.add_scalar("losses/td_loss", loss, global_step)
+                    writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
+                    print("SPS:", int(global_step / (time.time() - start_time)))
+                    writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-            if global_step % 100 == 0:
-                writer.add_scalar("losses/td_loss", loss, global_step)
-                writer.add_scalar("losses/q_values", current_q_values.mean().item(), global_step)
-                print("SPS:", int(global_step / (time.time() - start_time)))
-                writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+                # Optimize the model
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            # optimize the model
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
 
-        if global_step % args.target_network_frequency == 0:
-                for target_network_param, q_network_param in zip(target_network.parameters(), q_network.parameters()):
-                    target_network_param.data.copy_(
-                        args.tau * q_network_param.data + (1.0 - args.tau) * target_network_param.data
-                    )
+            # Update the target network
+            if global_step % args.target_network_frequency == 0:
+                    for target_network_param, q_network_param in zip(target_network.parameters(), q_network.parameters()):
+                        target_network_param.data.copy_(
+                            args.tau * q_network_param.data + (1.0 - args.tau) * target_network_param.data
+                        )
         
 
     if args.save_model:
